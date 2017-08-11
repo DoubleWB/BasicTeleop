@@ -9,13 +9,17 @@
 #include "sensor_msgs/CameraInfo.h"
 #include <cmath>
 #include <boost/date_time.hpp>
+#include <array>
 
 //Constants
 #define WIDTH 320
 #define HEIGHT 240
 #define PRINT_NAME(x) std::cout << #x << " - " << typeid(x).name() << '\n' // For Debugging
 #define DEGREES_PER_SECOND 90
-#define X_SHIFT .2
+#define X_SHIFT .16
+#define BLOB_TOLERANCE 10
+#define BLOB_MIN_SIZE 30
+#define HORIZON 240
 
 //Namespaces
 namespace btt = boost::posix_time;
@@ -34,8 +38,8 @@ class Blob {
         Blob (const depth_data&, int, int);        
         Blob (const depth_data&);        
         int getArea();
-        void getCenter(int *);
-        bool inBlob(const int *);
+        std::array<int, 2> getCenter();
+        bool inBlob(const std::array<int, 2>);
     private:
         int topX;
         int topY;
@@ -47,16 +51,18 @@ class Blob {
 sensor_msgs::CameraInfo camera;
 basic_teleop::Move last_dir;
 Blob last_blob;
-float last_untransformed[3];
-float velocity[3]; // m/s
+std::array<float, 3> last_untransformed;
+std::array<float, 3> velocity; // m/s
 btt::ptime last_time = btt::microsec_clock::universal_time();
+bool received_first = false;
+bool received_2 = false;
 
 //Protofunctions
 int getXY(const depth_data&, int, int);
 void print_closest_point_pixel_coords(const depth_data&);
-void conv_to_3d(const depth_data&, int, int, const double[9], float[3]);
-void conv_to_2d(const float[3], const double[9], int[2]);
-void change_velocity(const float[3]);
+std::array<float, 3> conv_to_3d(const depth_data&, int, int, const double*);
+std::array<int, 2> conv_to_2d(const std::array<float, 3>, const double*);
+void change_velocity(const std::array<float, 3>);
 
 //Definitions
 Blob::Blob (const depth_data& grid, int x, int y) {
@@ -70,8 +76,8 @@ Blob::Blob (const depth_data& grid, int x, int y) {
         int cur_reading = getXY(grid, botX, y); // Bring statement out of while 
                                                    // loop to save calc time.
 
-        if (!((getXY(grid, botX, y) <= (depth_standard + 10))
-            && (getXY(grid, botX, y) >= (depth_standard - 10))
+        if (!((cur_reading <= (depth_standard + BLOB_TOLERANCE))
+            && (cur_reading >= (depth_standard - BLOB_TOLERANCE))
             && (botX < WIDTH - 1))) {
             break;
         }
@@ -87,8 +93,8 @@ Blob::Blob (const depth_data& grid, int x, int y) {
         int cur_reading = getXY(grid, x, botY); // Bring statement out of while 
                                                    // loop to save calc time.
 
-        if (!((getXY(grid, x, botY) <= (depth_standard + 10))
-            && (getXY(grid, x, botY) >= (depth_standard - 10))
+        if (!((cur_reading <= (depth_standard + BLOB_TOLERANCE))
+            && (cur_reading >= (depth_standard - BLOB_TOLERANCE))
             && (botY < HEIGHT - 1))) {
             break;
         }
@@ -104,8 +110,8 @@ Blob::Blob (const depth_data& grid, int x, int y) {
         int cur_reading = getXY(grid, topX, y); // Bring statement out of while 
                                                    // loop to save calc time.
 
-        if (!((getXY(grid, topX, y) <= (depth_standard + 10))
-            && (getXY(grid, topX, y) >= (depth_standard - 10))
+        if (!((cur_reading <= (depth_standard + BLOB_TOLERANCE))
+            && (cur_reading >= (depth_standard - BLOB_TOLERANCE))
             && (topX > 1))) {
             break;
         }
@@ -119,8 +125,8 @@ Blob::Blob (const depth_data& grid, int x, int y) {
         int cur_reading = getXY(grid, x, topY); // Bring statement out of while 
                                                    // loop to save calc time.
 
-        if (!((getXY(grid, x, topY) <= (depth_standard + 10))
-            && (getXY(grid, x, topY) >= (depth_standard - 10))
+        if (!((cur_reading <= (depth_standard + BLOB_TOLERANCE))
+            && (cur_reading >= (depth_standard - BLOB_TOLERANCE))
             && (topY > 1))) {
             break;
         }
@@ -135,7 +141,7 @@ Blob::Blob (const depth_data& grid, int x, int y) {
 Blob::Blob (const depth_data& grid) {
     Blob b = Blob();
     int too_close = 0;
-    while(b.getArea() < 30) {
+    while(b.getArea() < BLOB_MIN_SIZE) {
         int new_x, new_y;
         int closest = INT_MAX;
         for(int x = 0; x < WIDTH; x++){
@@ -165,18 +171,20 @@ int Blob::getArea() {
     return (botX - topX) * (botY - topY);
 }
 
-void Blob::getCenter(int arr[2]) {
-    /*ROS_INFO("Center At: [%d, %d]",((topX + (botX - topX) / 2)),
-                  ((topY + (botY - topY) / 2)));
-    int temp[2] = {((topX + (botX - topX) / 2)),
-                  ((topY + (botY - topY) / 2))};  */ 
-    arr[0] = ((topX + (botX - topX) / 2));
-    arr[1] = ((topY + (botY - topY) / 2));
+std::array<int, 2> Blob::getCenter() {
+    ROS_INFO("botX: [%d]", botX);
+    ROS_INFO("topX: [%d]", topX);
+    ROS_INFO("botY: [%d]", botY);
+    ROS_INFO("topY: [%d]", topY);
+    return std::array<int, 2>{ //was this broken?
+                        {(topX + ((botX - topX) / 2)), 
+                         (topY + ((botY - topY) / 2))}
+                        };
 }
 
-bool Blob::inBlob(const int arr[2]) {
-    return ((topX <= arr[0]) && (arr[0] <= botX))
-            && ((topY <= arr[1]) && (arr[1] <= botY));
+bool Blob::inBlob(const std::array<int, 2> arr) {
+    return ((topX - 5 <= arr[0]) && (arr[0] + 5 <= botX)
+            && (topY - 5 <= arr[1]) && (arr[1] + 5 <= botY));
 }
 
 void callback(sensor_msgs::Image frame) {  
@@ -184,10 +192,8 @@ void callback(sensor_msgs::Image frame) {
     memcpy(&grid, frame.data.data(), sizeof(depth_data));
     Blob b = Blob(grid);    
     
-    int center[2] = {0, 0};
-    b.getCenter(center);
-    float real_coords[3] = {0, 0, 0};
-    conv_to_3d(grid, center[0], center[1], camera.K.data(), real_coords);
+    std::array<int, 2> center = b.getCenter();
+    std::array<float, 3> real_coords = conv_to_3d(grid, center[0], center[1], camera.K.data()); //may need to convert camera data
     
     /*int backwards[2] = {0, 0};
     conv_to_2d(real_coords, camera.K.data(), backwards);
@@ -197,13 +203,22 @@ void callback(sensor_msgs::Image frame) {
     ROS_INFO("Real World Last (x,y,z): [%f, %f, %f]", last_untransformed[0], last_untransformed[1], last_untransformed[2]);
     ROS_INFO("Real World Real (x,y,z): [%f, %f, %f]", real_coords[0], real_coords[1], real_coords[2]);
 
-    change_velocity(real_coords);
+    if (received_first) { // make sure we have real starting point to compare against    
+        change_velocity(real_coords);
+    }
+    
     last_untransformed[0] = real_coords[0];
     last_untransformed[1] = real_coords[1];
     last_untransformed[2] = real_coords[2];    
     last_time = btt::microsec_clock::universal_time();
     last_blob = b;
-    
+
+    if (!received_first) {
+        received_first = true;   
+    }
+    else if (!received_2) {
+        received_2 = true;
+    }
 }
 
 inline int getXY(const depth_data& grid, int x, int y) {
@@ -214,32 +229,36 @@ void set_camera_info(sensor_msgs::CameraInfo c){
     camera = c;
 }
 
-void conv_to_3d(const depth_data& grid, int x, int y, const double intr[9], float out[3]){
+std::array<float, 3> conv_to_3d(const depth_data& grid, int x, int y, const double* intr){
     //using default values found online    
     float cx = 319.5;// intr[2];
     float cy = 239.5;// intr[5];
     float fx_inv = 1.0 / 525.0;// intr[0];
     float fy_inv = 1.0 / 525.0;// intr[4];
 
-    out[2] = getXY(grid, x, y) * .001; // z
-    out[0] = (out[2] * ((x - cx) * fx_inv)) + X_SHIFT; //x
-    out[1] = out[2] * ((y - cy) * fy_inv); //y
+    float zO = getXY(grid, x, y) * .001; // z
+    float xO = (zO * ((x - cx) * fx_inv)) + X_SHIFT; //x
+    float yO = zO * ((y - cy) * fy_inv); //y
+
+    return std::array<float, 3> { {xO, yO, zO} };
 }
 
-void conv_to_2d(const float in[3], const double intr[9], int out[2]){
+std::array<int, 2> conv_to_2d(const std::array<float, 3> in, const double* intr){
     //using default values found online    
     float cx = 319.5;// intr[2];
     float cy = 239.5;// intr[5];
     float fx = 525.0;// intr[0];
     float fy = 525.0;// intr[4];    
 
-    out[0] = (((in[0] - X_SHIFT) * fx) / in[2]) + cx;
-    out[1] = ((in[1] * fy) / in[2]) + cy;
+    return std::array<int, 2> { 
+                              {(((in[0] - X_SHIFT) * fx) / in[2]) + cx,
+                               ((in[1] * fy) / in[2]) + cy}
+                              };
 }
 
-void rotate_point_around_robot(float out[3], float angle) {
-    float x = out[0];// height doesn't change with turning
-    float z = out[2];
+std::array<float, 3> rotate_point_around_robot(const std::array<float, 3> in, float angle) {
+    float x = in[0];// height doesn't change with turning
+    float z = in[2];
 
     angle = angle*M_PI/180; // Convert to radians
     
@@ -255,27 +274,22 @@ void rotate_point_around_robot(float out[3], float angle) {
     x += pivX;
     z += pivZ;
 
-    out[0] = x;
-    out[2] = z;
+    return std::array<float, 3> { {x, in[1], z} }; //care for pointer problems
 }
 
-void change_velocity(const float new_transformed[3]) {
-    float temp[3] = {0, 0, 0};
-    temp[0] = new_transformed[0];
-    temp[1] = new_transformed[1];
-    temp[2] = new_transformed[2];
+void change_velocity(const std::array<float, 3> new_transformed) {
     double time_passed = (btt::microsec_clock::universal_time() - last_time).total_milliseconds() / 1000.0; //In Seconds 
     float angle_turned = DEGREES_PER_SECOND * time_passed;
-    if (last_dir.direction.data() == "ccw") {
-        angle_turned *= -1.0;
+    if (last_dir.direction == "ccw") {
+        angle_turned *= -1.0; // is this right for undoing the turning? - since cw is in the negative direction, flip 
+    }
+    else if (last_dir.direction == "fwd") {
+        angle_turned = 0;
     }
 
-    rotate_point_around_robot(temp, angle_turned); // undo expected rotation
-    
-    int temp_2d[2] = {0, 0};
+    std::array<float, 3> temp = rotate_point_around_robot(new_transformed, angle_turned); // undo expected rotation
 
-    conv_to_2d(temp, camera.K.data(), temp_2d); // Adjust for shakiness of picture
-    if (last_blob.inBlob(temp_2d)) {
+    if (last_blob.inBlob(conv_to_2d(temp, camera.K.data()))) {
         velocity[0] = 0;
         velocity[1] = 0;
         velocity[2] = 0;
@@ -288,11 +302,12 @@ void change_velocity(const float new_transformed[3]) {
     ROS_INFO("Temp[0]: %f", temp[0]);
     ROS_INFO("last_untransf[0]: %f", last_untransformed[0]);
     ROS_INFO("Time passed: %f", time_passed);
-    ROS_INFO("Vel (x,y,z): [%f, %f, %f]", velocity[0], velocity[1], velocity[2]);
+    ROS_INFO("New Vel (x,y,z): [%f, %f, %f]", velocity[0], velocity[1], velocity[2]);
 }
 
-void predict_new_center(float new_center[3]) {
+std::array<float, 3> predict_new_center() {
     double time_passed = (btt::microsec_clock::universal_time() - last_time).total_milliseconds() / 1000.0; //In Seconds   
+    std::array<float, 3> new_center { {0.0, 0.0, 0.0} };
     new_center[0] = last_untransformed[0] + (velocity[0] * time_passed); //apply predicted movement 
                                                                          //of target
     new_center[1] = last_untransformed[1] + (velocity[1] * time_passed);
@@ -304,7 +319,7 @@ void predict_new_center(float new_center[3]) {
         angle_turned *= -1.0;
     }
 
-    rotate_point_around_robot(new_center, angle_turned); // apply predicted movement of robot
+    return rotate_point_around_robot(new_center, angle_turned); // apply predicted movement of robot
 }
 
 void print_closest_point_pixel_coords(const depth_data& grid) {
@@ -366,22 +381,30 @@ int main(int argc, char **argv)
    * A count of how many messages we have sent.
    */
   int count = 0;
+    
+  last_dir.direction = "fwd";
+
   while (ros::ok())
   {
-    float temp_center[3] = {0,0,0};    
+    
+    while(!received_2) { // wait until we have valid velocity data
+        ros::spinOnce();
 
-    int temp_2d[2] = {0,0};
+        loop_rate.sleep();
+    } 
 
-    predict_new_center(temp_center);    
+    ROS_INFO("Last pub-ed: [%s]", last_dir.direction.data());  
+
+    std::array<float, 3> new_center = predict_new_center();    
 
     basic_teleop::Move next;
 
-    conv_to_2d(temp_center, camera.K.data(), temp_2d);
+    std::array<int, 2> temp_2d = conv_to_2d(new_center, camera.K.data());
 
     if(temp_2d[0] >= 130 && temp_2d[0] <= 190) {
         next.direction = "fwd";
     }
-    else if(temp_2d[0] > 190){
+    else if(temp_2d[0] < 130){ // to the right of the robot is lower values
         next.direction = "cw";
     }
     else {
@@ -389,9 +412,7 @@ int main(int argc, char **argv)
     }
     
     dir_pub.publish(next);
-    last_dir = next;
-
-    ROS_INFO("Real World Pred (x,y,z): [%f, %f, %f]", temp_center[0], temp_center[1], temp_center[2]);    
+    last_dir = next;  
     
     ros::spinOnce();
 

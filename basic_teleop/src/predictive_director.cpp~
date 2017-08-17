@@ -17,8 +17,8 @@
 #define PRINT_NAME(x) std::cout << #x << " - " << typeid(x).name() << '\n' // For Debugging
 #define DEGREES_PER_SECOND 90
 #define X_SHIFT .16
-#define BLOB_TOLERANCE 10
-#define BLOB_MIN_SIZE 30
+#define BLOB_TOLERANCE 15
+#define BLOB_MIN_SIZE 25
 #define HORIZON 240
 
 //Namespaces
@@ -56,6 +56,8 @@ std::array<float, 3> velocity; // m/s
 btt::ptime last_time = btt::microsec_clock::universal_time();
 bool received_first = false;
 bool received_2 = false;
+bool calibrate_lag = false;
+depth_data d;
 
 //Protofunctions
 int getXY(const depth_data&, int, int);
@@ -172,10 +174,10 @@ int Blob::getArea() {
 }
 
 std::array<int, 2> Blob::getCenter() {
-    ROS_INFO("botX: [%d]", botX);
+    /*ROS_INFO("botX: [%d]", botX);
     ROS_INFO("topX: [%d]", topX);
     ROS_INFO("botY: [%d]", botY);
-    ROS_INFO("topY: [%d]", topY);
+    ROS_INFO("topY: [%d]", topY);*/
     return std::array<int, 2>{ //was this broken?
                         {(topX + ((botX - topX) / 2)), 
                          (topY + ((botY - topY) / 2))}
@@ -190,6 +192,7 @@ bool Blob::inBlob(const std::array<int, 2> arr) {
 void callback(sensor_msgs::Image frame) {  
     depth_data grid;
     memcpy(&grid, frame.data.data(), sizeof(depth_data));
+    d = grid;
     Blob b = Blob(grid);    
     
     std::array<int, 2> center = b.getCenter();
@@ -392,6 +395,34 @@ int main(int argc, char **argv)
 
         loop_rate.sleep();
     } 
+
+    while(calibrate_lag && ros::ok()) {
+        std::array<float, 3> first_center = last_untransformed;
+        basic_teleop::Move next;
+        next.direction = "cw";
+        dir_pub.publish(next);
+        ros::Rate loop_rate1(2);
+        loop_rate1.sleep();
+        next.direction = "fwd";
+        dir_pub.publish(next);  //drive for half of a second
+        
+        ros::Rate loop_rate2(1000);
+        int millicount = 0;
+        /*!last_blob.inBlob(conv_to_2d(
+                                        rotate_point_around_robot(
+                                            first_center
+                                        , 45)
+                                , camera.K.data())) */
+        while (millicount < 500 && ros::ok()) { // while the non moving blob hasn't reached it's predicted position
+            ros::spinOnce();
+            millicount++;
+            loop_rate2.sleep();
+            ROS_INFO("First Blob Center: [%d, %d] New Blob Center: [%d, %d] and %d", conv_to_2d(first_center, camera.K.data())[0], conv_to_2d(first_center, camera.K.data())[1], last_blob.getCenter()[0], last_blob.getCenter()[1], millicount);
+        }
+
+        ROS_INFO("Estimated picture lag: [%d]", millicount);
+        
+    }
 
     ROS_INFO("Last pub-ed: [%s]", last_dir.direction.data());  
 
